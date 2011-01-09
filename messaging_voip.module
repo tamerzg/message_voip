@@ -1,0 +1,207 @@
+<?php
+/**
+ * @file
+ * Voip using Voip Drupal platform. Messaging method plug-in
+ */
+
+ /**
+ * Implementation of hook_form_alter().
+ * Add option to admin messaging settings: default send method for phone call informing that there\'s a message
+ */
+function messaging_voip_form_alter(&$form, $form_state, $form_id) {
+	if($form_id=='messaging_admin_settings'){
+		
+		$methods = messaging_method_list();
+		unset($methods['voip_message']);
+		unset($methods['voip_inform']);
+		//var_dump($methods);die();
+		$form['general']['messaging_default_phone_method']=array(
+			'#title' => t('Default Send Method for phone call informing that there\'s a message'),
+			'#type' => 'radios',
+			'#options' => $methods,
+			'#default_value' => variable_get('messaging_default_phone_method', 'debug'),
+			'#description' => t('Important only if you are using "Phone call informing that there\'s a message" as send method.'),
+				);
+	}
+}
+
+/**
+ * Implementation of hook_user().
+ *
+ * Adds option to user profile messaging settings: default send method for phone call informing that there\'s a message
+ */
+function messaging_voip_user($type, $edit, &$user, $category = NULL) {
+  switch ($type) {
+    case 'form':
+      if ($category == 'account' && ($list = messaging_method_list($user))) {
+        unset($list['voip_message']);
+		unset($list['voip_inform']);
+        $form['messaging']['messaging_default_phone'] = array(
+          '#type'          => 'select',
+          '#title'         => t('Default Send Method for phone call informing that there\'s a message'),
+          '#default_value' => messaging_voip_method_default($user),
+          '#options' => $list,
+          '#description'   => t('Important only if you are using "Phone call informing that there\'s a message" as send method.'),
+          '#disabled' => count($list) == 1,
+        );
+        return $form;
+      }
+      break;
+  }
+}
+
+/**
+ * Returns default messaging method for phone call that reads the message text
+ */
+function messaging_voip_method_default($account = NULL) {
+  if ($account && !empty($account->messaging_default_phone) && messaging_method_permission($account->messaging_default_phone, $account)) {
+    return $account->messaging_default_phone;
+  }
+  elseif ($method = variable_get('messaging_default_phone_method', '')) {
+    return $method;
+  }
+  else {
+    return key(messaging_method_info());
+  }
+}
+/**
+ * Implementation of hook_messaging
+ */
+function messaging_voip_messaging($op = 'info') {
+  switch($op) {
+    case 'send methods':
+      $info['voip_message'] = array(
+        'title' => 'Phone call that reads the message text',
+        'name' => t('Phone call that reads the message text'),
+        'group' => 'voip', // Class of send method
+        'type' => MESSAGING_TYPE_SEND,
+        'glue' => ' ',
+        'description' => t('Phone call that reads the message text.'),
+        'render callback' => 'messaging_voip_render_message',
+        'send callback' => 'messaging_voip_send_msg',
+        'destination callback' => 'messaging_voip_user_destination',
+      );
+	  
+	  $info['voip_inform'] = array(
+        'title' => 'Phone call informing that there\'s a message',
+        'name' => t('Phone call informing that there\'s a message'),
+        'group' => 'voip', // Class of send method
+        'type' => MESSAGING_TYPE_SEND,
+        'glue' => ' ',
+        'description' => t('Phone call informing that there\'s a message'),
+        'render callback' => 'messaging_voip_render_message',
+        'send callback' => 'messaging_voip_send_inform',
+        'destination callback' => 'messaging_voip_user_destination',
+      );
+      return $info;  
+  }
+}
+
+/**
+ * Message Render callback for voip_message
+ */
+function messaging_voip_render_message($message, $info) {
+  // We need to apply filtering first or run through the render function
+  $message = messaging_message_render($message, $info);
+  // Now we do some clean up in the body that may contain new lines, replace them with spaces
+  if ($message->body) {
+    $message->body = messaging_text_clean($message->body, ' ');
+  }
+  return $message;
+}
+
+/**
+ * Map user account to phone number destination
+ */
+function messaging_voip_user_destination($account, $message) {
+  // Check for active mobile infomation. Simply return it so that the send
+  // callback has a destination array and access everything.
+  if(!empty($account->voipnumber_phone)){
+	$phone=$account->voipnumber_country.$account->voipnumber_area.$account->voipnumber_phone;	
+	return $phone;
+  }
+}
+
+/**
+ * Read the message in phone call.
+ * @param $destination
+ *   Mobile phone number
+ */
+function messaging_voip_send_msg($destination, $message, $params = array()) {
+  $text = messaging_text_build($message, ' ');
+  return messaging_voip_send($destination, $text, $params);
+}
+
+/*
+*Send the message and inform user via phone call that there is a message for him
+*/
+function messaging_voip_send_inform($destination, $message, $params = array()) {
+  //Send the actual message to default send method (mail,web,...)
+  $method=messaging_voip_method_default($message->account);
+  $destinations[]=messaging_user_destination($message->account, $method, $message);
+  messaging_message_send($destinations, $message, $method);
+  
+  //Inform user via phone call that there is a message for him
+  $site_name=variable_get('site_name', '');
+  $message->body =  messaging_text_clean("There is a new message for you on ".$site_name, ' ');
+  $text = messaging_text_build($message, ' ');
+  return messaging_voip_send($destination, $text, $params);
+}
+ 
+/**
+ * Implementation of hook_disable()
+ */
+function messaging_voip_disable() {
+  messaging_method_disable('voip_message');
+  messaging_method_disable('voip_inform');
+}
+
+/**
+ * Sends a message using the active voip server.
+ * 
+ * @param $number
+ *   The destination number.
+ * 
+ * @param $message
+ *   The text of the messsage to send.
+ * 
+ * @param $options
+ *   An array of additional properties as defined by gateway modules.
+ */
+function messaging_voip_send($number, $message, $options = array()) {
+  
+  //Create a script which will play message
+  //TODO: Should we read the sender name? The site name? How will user know that this is message from our site?
+  $script = new VoipScript('voipscript_messaging_read_text');
+  //Play the message
+  $script->addLabel('play message');
+  $script->addSay($message);
+  //Play again or hangup choices
+  $script->addLabel('get input');
+  $text = t("To play this message again, press 1. To hangup, press the pound key.");
+  $url = '';
+  $timeout = 5;
+  $end_key = '';
+  $num_digits = 1;
+  $script->addGetInput($text, $url, $timeout, $end_key, $num_digits);
+  $script->addGotoIf('play message', "^%input_digits == '1'");
+  $script->addGotoIf('end call', "^%input_digits == '#'");
+  //Wrong input
+  $script->addSay('Invalid input received. Please try again.');
+  $script->addGoto('get input');
+  //Terminate call
+  $script->addLabel('end call');
+  $script->addHangup();
+  
+  //Create a call
+  $call = new VoipCall();
+  $call->setDestNumber($number);
+ 
+  $call->setCallerName('Drupal Messaging Voip');
+  $call->setScript($script);
+  $call->save();
+	
+  // Dial the call.
+  voip_dial($call);	
+  return TRUE;
+}

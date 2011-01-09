@@ -1,0 +1,7 @@
+name = Voip Messaging
+description = Sending Method: Voip
+package = "Messaging"
+dependencies[] = messaging
+dependencies[] = voip
+dependencies[] = voipnumber
+core = 6.x
